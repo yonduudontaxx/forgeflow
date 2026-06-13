@@ -1,0 +1,27 @@
+# Elixir/Mix
+_build/
+deps/
+*.beam
+erl_crash.dump
+
+# Environment
+.env
+.env.*
+
+# Test coverage
+cover/
+
+# Generated docs
+doc/
+
+# Phoenix assets
+priv/static/assets/
+
+# Editor
+.elixir_ls/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
