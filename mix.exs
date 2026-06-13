@@ -5,14 +5,18 @@ defmodule Forgeflow.MixProject do
     [
       app: :forgeflow,
       version: "0.1.0",
-      elixir: "~> 1.20",
+      elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
       deps: deps()
     ]
   end
 
-  # Run "mix help compile.app" to learn about applications.
+  def cli do
+    [preferred_envs: [ci: :test]]
+  end
+
   def application do
     [
       extra_applications: [:logger],
@@ -20,7 +24,6 @@ defmodule Forgeflow.MixProject do
     ]
   end
 
-  # Run "mix help deps" to learn about dependencies.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
@@ -29,6 +32,16 @@ defmodule Forgeflow.MixProject do
       {:ecto_sql, "~> 3.11"},
       {:postgrex, "~> 0.17"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+    ]
+  end
+
+  defp aliases do
+    [
+      ci: [
+        "format --check-formatted",
+        "credo --strict",
+        "test"
+      ]
     ]
   end
 end
