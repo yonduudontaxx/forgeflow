@@ -31,6 +31,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
@@ -38,20 +40,27 @@ jobs:
           set -euo pipefail
           failures=0
           fail() { printf '::error::%s\n' "$(printf '%s' "$1" | tr -c '[:print:]' '?')"; failures=$((failures + 1)); }
-          has_label() { printf '%s' "$LABELS" | grep -qF "\"$1\""; }
+          has_label() { grep -qF "\"$1\"" <<< "$LABELS"; }
           lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           need_label() { has_label "$1" || fail "$2: needs the $1 label"; }
           git_() { git -c core.quotePath=false "$@"; }
 
           conventional='^(feat|fix|test|refactor|docs|chore|ci|perf)\([a-z0-9._-]+\)!?: .+'
-          tools='claude|chatgpt|copilot|cursor|gemini|codex|an? ai|ai'
-          attribution="co-authored-by:|assisted-by:|(generated|made|written|created|authored) (with|by) ($tools)\\b|claude code|noreply@anthropic\\.com|🤖"
+          tools='claude|chatgpt|copilot|gemini|codex'
+          verbs='generated|made|written|created|authored|drafted|produced'
+          via='with|by|using|via|with help from|with the help of'
+          attribution="co-authored-by *:|assisted-by *:|($verbs) ($via) ($tools)\\b|\\bclaude (code|wrote|generated|authored)\\b|noreply@anthropic\\.com|🤖"
+          text_attribution="$attribution|\\b(claude|anthropic|chatgpt|copilot)\\b"
+          scratch=$(mktemp -d)
 
           git merge-base "$BASE_SHA" "$HEAD_SHA" > /dev/null
 
-          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" != "develop" ]; then
-            fail "PRs into main must come from develop (got $HEAD_REF)"
+          if [ "$BASE_REF" = "main" ] && { [ "$HEAD_REF" != "develop" ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; }; then
+            fail "PRs into main must come from $BASE_REPO:develop (got $HEAD_REPO:$HEAD_REF)"
           fi
+
+          git_ diff -z --no-renames --name-only "$BASE_SHA...$HEAD_SHA" > "$scratch/files"
+          shas=$(git rev-list "$BASE_SHA..$HEAD_SHA")
 
           echo "Changed files:"
           while IFS= read -r -d '' f; do
@@ -79,26 +88,27 @@ jobs:
               .env|.env.*|*.pem|*.key)
                 fail "$f: secret files are never committed" ;;
             esac
-          done < <(git_ diff -z --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
+          done < "$scratch/files"
 
-          for sha in $(git rev-list "$BASE_SHA..$HEAD_SHA"); do
+          for sha in $shas; do
             short=${sha:0:7}
             subject=$(git log -1 --format=%s "$sha")
+            message=$(git log -1 --format=%B "$sha")
             parents=$(git rev-list --parents -n 1 "$sha" | wc -w)
             if [ "$parents" -le 2 ]; then
               grep -qE "$conventional" <<< "$subject" || fail "$short: subject is not type(scope): description: $subject"
-              files=$(git_ diff-tree --no-commit-id --no-renames --name-only -r "$sha")
-              if grep -qx 'mix.lock' <<< "$files" && ! grep -qx 'mix.exs' <<< "$files" && ! grep -qE '^(chore|fix)\(deps\)' <<< "$subject"; then
-                fail "$short: mix.lock changed without mix.exs or a (deps) scope"
-              fi
             fi
-            if git log -1 --format=%B "$sha" | grep -qiE "$attribution"; then
+            files=$(git_ diff-tree --no-commit-id --no-renames --name-only -r "$sha^1" "$sha")
+            if grep -qx 'mix.lock' <<< "$files" && ! grep -qx 'mix.exs' <<< "$files" && ! grep -qE '^(chore|fix)\(deps\)' <<< "$subject"; then
+              fail "$short: mix.lock changed without mix.exs or a (deps) scope"
+            fi
+            if grep -qiE "$text_attribution" <<< "$message"; then
               fail "$short: commit message contains attribution"
             fi
           done
 
           grep -qE "$conventional" <<< "$PR_TITLE" || fail "PR title is not type(scope): description: $PR_TITLE"
-          if grep -qiE "$attribution" <<< "$PR_TITLE"$'\n'"$PR_BODY"; then
+          if grep -qiE "$text_attribution" <<< "$PR_TITLE"$'\n'"$PR_BODY"; then
             fail "PR title or description contains attribution"
           fi
           for section in '## What' '## Why' '## How to verify'; do
@@ -106,10 +116,10 @@ jobs:
               || fail "PR description needs a non-empty '$section' section"
           done
 
-          added=$(git_ diff --no-ext-diff --no-textconv --no-renames -U0 "$BASE_SHA...$HEAD_SHA" \
-            -- . ':(exclude).github/workflows/guard.yml' ':(exclude)AGENTS.md' ':(exclude)CLAUDE.md' \
-            | grep '^+' | grep -v '^+++' || true)
-          if grep -qiE "$attribution" <<< "$added"; then
+          git_ diff --no-ext-diff --no-textconv --no-renames -U0 "$BASE_SHA...$HEAD_SHA" \
+            -- . ':(exclude).github/workflows/guard.yml' ':(exclude)AGENTS.md' ':(exclude)CLAUDE.md' > "$scratch/diff"
+          { grep '^+' "$scratch/diff" || true; } | { grep -v '^+++' || true; } > "$scratch/added"
+          if grep -qiE "$attribution" "$scratch/added"; then
             fail "added lines contain attribution"
           fi
 
