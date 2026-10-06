@@ -124,3 +124,4 @@ After every task Claude must report:
 - Never modifies AGENTS.md unless explicitly instructed to do so
 - Never skips a check because "it probably passes"
 - Never proceeds to the next task if the current task has a failing check
+- Never applies the allow-docs, allow-agent-files or allow-ci-changes labels — only the repository owner applies them
