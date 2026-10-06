@@ -38,10 +38,14 @@ defmodule Forgeflow.MixProject do
   defp aliases do
     [
       ci: [
+        "deps.unlock --check-unused",
+        "hex.audit",
+        "compile --warnings-as-errors --force",
         "format --check-formatted",
         "credo --strict",
-        "test"
-      ]
+        "test --warnings-as-errors"
+      ],
+      test: ["ecto.create --quiet", "test"]
     ]
   end
 end
