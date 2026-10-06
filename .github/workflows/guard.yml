@@ -1,0 +1,117 @@
+name: guard
+
+on:
+  pull_request_target:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce AGENTS.md commit and PR rules
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          failures=0
+          fail() { printf '::error::%s\n' "$(printf '%s' "$1" | tr -c '[:print:]' '?')"; failures=$((failures + 1)); }
+          has_label() { printf '%s' "$LABELS" | grep -qF "\"$1\""; }
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          need_label() { has_label "$1" || fail "$2: needs the $1 label"; }
+          git_() { git -c core.quotePath=false "$@"; }
+
+          conventional='^(feat|fix|test|refactor|docs|chore|ci|perf)\([a-z0-9._-]+\)!?: .+'
+          tools='claude|chatgpt|copilot|cursor|gemini|codex|an? ai|ai'
+          attribution="co-authored-by:|assisted-by:|(generated|made|written|created|authored) (with|by) ($tools)\\b|claude code|noreply@anthropic\\.com|🤖"
+
+          git merge-base "$BASE_SHA" "$HEAD_SHA" > /dev/null
+
+          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" != "develop" ]; then
+            fail "PRs into main must come from develop (got $HEAD_REF)"
+          fi
+
+          echo "Changed files:"
+          while IFS= read -r -d '' f; do
+            printf '  %s\n' "$f" | tr -c '[:print:]\n' '?'
+            lf=$(lower "$f")
+            name=${lf##*/}
+            case "$lf" in
+              agents.md|claude.md|gemini.md|*/agents.md|*/claude.md|*/gemini.md|\
+              .claude/*|*/.claude/*|.cursor/*|*/.cursor/*|.omc/*|*/.omc/*|.aider*|*/.aider*|\
+              .cursorrules|*/.cursorrules|.windsurfrules|*/.windsurfrules|*copilot-instructions*|.github/instructions/*)
+                need_label allow-agent-files "$f" ;;
+              .github/*)
+                need_label allow-ci-changes "$f" ;;
+              docs/*.md)
+                need_label allow-docs "$f" ;;
+              *.md|*.mdx|*.markdown)
+                fail "$f: markdown files are only allowed under docs/" ;;
+              .vscode/*|*/.vscode/*|.idea/*|*/.idea/*|.elixir_ls/*|*/.elixir_ls/*|_build/*|deps/*|*.beam|*.ez)
+                fail "$f: editor or build artifacts are never committed" ;;
+            esac
+            case "$name" in
+              .ds_store|thumbs.db|erl_crash.dump|*.swp|*.swo|*~)
+                fail "$f: generated files are never committed" ;;
+              .env.example|.env.sample) ;;
+              .env|.env.*|*.pem|*.key)
+                fail "$f: secret files are never committed" ;;
+            esac
+          done < <(git_ diff -z --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
+
+          for sha in $(git rev-list "$BASE_SHA..$HEAD_SHA"); do
+            short=${sha:0:7}
+            subject=$(git log -1 --format=%s "$sha")
+            parents=$(git rev-list --parents -n 1 "$sha" | wc -w)
+            if [ "$parents" -le 2 ]; then
+              grep -qE "$conventional" <<< "$subject" || fail "$short: subject is not type(scope): description: $subject"
+              files=$(git_ diff-tree --no-commit-id --no-renames --name-only -r "$sha")
+              if grep -qx 'mix.lock' <<< "$files" && ! grep -qx 'mix.exs' <<< "$files" && ! grep -qE '^(chore|fix)\(deps\)' <<< "$subject"; then
+                fail "$short: mix.lock changed without mix.exs or a (deps) scope"
+              fi
+            fi
+            if git log -1 --format=%B "$sha" | grep -qiE "$attribution"; then
+              fail "$short: commit message contains attribution"
+            fi
+          done
+
+          grep -qE "$conventional" <<< "$PR_TITLE" || fail "PR title is not type(scope): description: $PR_TITLE"
+          if grep -qiE "$attribution" <<< "$PR_TITLE"$'\n'"$PR_BODY"; then
+            fail "PR title or description contains attribution"
+          fi
+          for section in '## What' '## Why' '## How to verify'; do
+            awk -v h="$section" '{ sub(/\r$/, "") } $0 == h { f = 1; next } f && /^#/ { exit } f && NF { ok = 1; exit } END { exit !ok }' <<< "$PR_BODY" \
+              || fail "PR description needs a non-empty '$section' section"
+          done
+
+          added=$(git_ diff --no-ext-diff --no-textconv --no-renames -U0 "$BASE_SHA...$HEAD_SHA" \
+            -- . ':(exclude).github/workflows/guard.yml' ':(exclude)AGENTS.md' ':(exclude)CLAUDE.md' \
+            | grep '^+' | grep -v '^+++' || true)
+          if grep -qiE "$attribution" <<< "$added"; then
+            fail "added lines contain attribution"
+          fi
+
+          [ "$failures" -eq 0 ] || { echo "$failures guard violation(s)"; exit 1; }
+          echo "guard: clean"
